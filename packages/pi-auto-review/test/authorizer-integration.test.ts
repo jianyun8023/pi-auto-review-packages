@@ -641,7 +641,7 @@ test("ready registration is session-scoped and idempotent", async () => {
   assert.equal(instance.disposalCalls, 1);
 });
 
-test("shutdown invalidates a late session-scoped registration task", async () => {
+test("registration is immediate and shutdown invalidates late readiness", async () => {
   const instance = harness(allow, { emitReady: false });
   instance.dispose();
   // A permissions:ready that arrives after shutdown must not register.
@@ -650,11 +650,11 @@ test("shutdown invalidates a late session-scoped registration task", async () =>
     adjudicatesLocally: true,
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(instance.registrationCalls, 0);
-  assert.equal(instance.disposalCalls, 0);
+  assert.equal(instance.registrationCalls, 1);
+  assert.equal(instance.disposalCalls, 1);
 });
 
-test("a new ready session disposes the previous authorizer before registering", async () => {
+test("another session readiness never steals this session authorizer", async () => {
   const instance = harness(allow);
   const nextRegistry = new AuthorizerRegistry();
   let nextDisposals = 0;
@@ -679,13 +679,13 @@ test("a new ready session disposes the previous authorizer before registering", 
       adjudicatesLocally: true,
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(instance.disposalCalls, 1);
-    assert.ok(nextRegistry.get("pi-auto-review"));
+    assert.equal(instance.disposalCalls, 0);
+    assert.equal(nextRegistry.get("pi-auto-review"), undefined);
   } finally {
     instance.dispose();
     unpublishPermissionsService("next-session", nextService as never);
   }
-  assert.equal(nextDisposals, 1);
+  assert.equal(nextDisposals, 0);
 });
 
 test("in-process nodes register independently and child shutdown preserves parent", async () => {
@@ -1070,7 +1070,7 @@ test("real permission-system authorizer chain integration", async (t) => {
       assert.equal(context.messages.length, 2);
       // Loose guard against unbounded prompt growth; the #910 matchedSpelling
       // sentence sits at ~2.0k characters, so keep headroom for doc tweaks.
-      assert.ok(context.systemPrompt.length < 2_100);
+      assert.ok(context.systemPrompt.length < 2_800);
       assert.equal(context.systemPrompt.match(/"outcome"/g)?.length, 1);
       assert.match(context.systemPrompt, /\$HOME/);
       assert.match(
@@ -1101,6 +1101,7 @@ test("real permission-system authorizer chain integration", async (t) => {
         "id",
         "matchedPolicy",
         "operation",
+        "reviewEnvironment",
         "source",
         "surface",
         "toolCallId",
@@ -1114,12 +1115,14 @@ test("real permission-system authorizer chain integration", async (t) => {
           id: "canonical-dedupe",
           matchedPolicy: { decision: "ask", rule: "ask" },
           operation: "tool",
+          reviewEnvironment: request.reviewEnvironment,
           source: "permission-system",
           surface: "bash_escalated",
           toolCallId: "call-current",
           toolName: "bash",
         },
       );
+      assert.equal((request.reviewEnvironment as { authorization: string }).authorization, "none");
       const evidence = envelope.evidence as Record<string, {
         items: Array<Record<string, unknown>>;
         trust: string;

@@ -1,3 +1,4 @@
+import { reviewEnvironment } from "./environment.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -87,6 +88,7 @@ export function boundaryRequest(
   ctx: ExtensionContext,
   details: PromptPermissionDetails,
   query: PermissionQuery,
+  roots: readonly string[] = [],
 ): BoundaryRequest {
   const evidence = normalizePermissionEvidence(details);
   const surface = evidence.surface;
@@ -113,6 +115,7 @@ export function boundaryRequest(
     surface,
     operation: details.source || surface,
     cwd: ctx.cwd,
+    reviewEnvironment: reviewEnvironment(ctx.cwd, roots),
     command: evidence.command,
     ...(evidence.executedUnit ? { executedUnit: evidence.executedUnit } : {}),
     ...(evidence.fullCommand ? { fullCommand: evidence.fullCommand } : {}),

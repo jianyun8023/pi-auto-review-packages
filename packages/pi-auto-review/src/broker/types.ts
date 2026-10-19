@@ -15,6 +15,7 @@ export type BoundarySource =
   | (string & {});
 
 export type BoundaryRequest = {
+  reviewEnvironment?: import("../review/environment.ts").ReviewEnvironment;
   id: string;
   source: BoundarySource;
   surface: BoundarySurface;

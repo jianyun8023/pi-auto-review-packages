@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BOUNDED_SURFACES,
@@ -51,6 +51,7 @@ export function validateConfig(value: unknown, source: string): Config {
     "grantTtlMs",
     "autoConfirmBoundedAllows",
     "policyAudit",
+    "reviewRoots",
   ]);
   const unknownKeys = Object.keys(raw).filter((key) => !allowedKeys.has(key));
   if (unknownKeys.length > 0) {
@@ -59,6 +60,7 @@ export function validateConfig(value: unknown, source: string): Config {
     );
   }
   const config = { ...DEFAULT_CONFIG, ...raw };
+  if (raw.reviewRoots !== undefined && (!Array.isArray(raw.reviewRoots) || raw.reviewRoots.length > 16 || raw.reviewRoots.some(root => typeof root !== "string" || root.length > 1024 || !isAbsolute(root)))) throw new Error(`${EXTENSION_NAME}: reviewRoots must contain at most 16 absolute paths`);
   config.policyAudit = {
     ...DEFAULT_CONFIG.policyAudit,
     ...(raw.policyAudit as Partial<PolicyAuditConfig> | undefined),

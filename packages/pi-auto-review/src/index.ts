@@ -23,6 +23,7 @@ import {
   type BoundaryRequest,
 } from "./broker/index.ts";
 import { PermissionUiAutoConfirmer } from "./ui-auto-confirm.ts";
+import { PermissionRpcAutoConfirmer } from "./rpc-auto-confirm.ts";
 import {
   buildUserReviewNotice,
   buildUserReviewStatus,
@@ -218,6 +219,7 @@ export function createPiAutoReviewExtension(
   let disposeAuthorizer: (() => void) | undefined;
   let registeredSessionId: string | undefined;
   let registrationEpoch = 0;
+  let reviewGeneration = 0;
   let shuttingDown = false;
   let disposeBrokerService: (() => void) | undefined;
   const reviewResults = new Map<string, ReviewResult>();
@@ -227,6 +229,9 @@ export function createPiAutoReviewExtension(
   // so a models.json or provider refresh mid-session is observed on the
   // next review instead of reusing a stale model/stream binding.
   const uiAutoConfirmer = new PermissionUiAutoConfirmer(
+    () => config.autoConfirmBoundedAllows,
+  );
+  const rpcAutoConfirmer = new PermissionRpcAutoConfirmer(
     () => config.autoConfirmBoundedAllows,
   );
   const reviewWidget = new UserReviewWidgetController();
@@ -414,9 +419,9 @@ export function createPiAutoReviewExtension(
     description:
       "Approve one exact recent denial for a single reviewer retry",
     handler: async (_args, ctx) => {
-      if (!ctx.hasUI || ctx.mode !== "tui") {
+      if (!ctx.hasUI || (ctx.mode !== "tui" && ctx.mode !== "rpc")) {
         ctx.ui.notify(
-          "/auto-review-approve requires interactive TUI mode.",
+          "/auto-review-approve requires interactive TUI or RPC UI.",
           "warning",
         );
         return;
@@ -499,9 +504,9 @@ export function createPiAutoReviewExtension(
     description:
       "Authorize one exact recent critical model denial after a typed challenge",
     handler: async (_args, ctx) => {
-      if (!ctx.hasUI || ctx.mode !== "tui") {
+      if (!ctx.hasUI || (ctx.mode !== "tui" && ctx.mode !== "rpc")) {
         ctx.ui.notify(
-          "/auto-review-break-glass requires interactive TUI mode.",
+          "/auto-review-break-glass requires interactive TUI or RPC UI.",
           "warning",
         );
         return;
@@ -642,6 +647,7 @@ export function createPiAutoReviewExtension(
     reviewResults.clear();
     telemetryCompleted.clear();
     uiAutoConfirmer.clear();
+    rpcAutoConfirmer.clear();
     try {
       config = sessionConfig(
         ctx.cwd,
@@ -651,6 +657,7 @@ export function createPiAutoReviewExtension(
       context = ctx;
       broker = createBroker();
       policyAudit.warmup();
+      rpcAutoConfirmer.attach(ctx);
       try {
         disposeBrokerService = publishBoundaryBroker(broker);
       } catch (error) {
@@ -662,7 +669,13 @@ export function createPiAutoReviewExtension(
         // The process-global broker capability remains owned by the parent.
         disposeBrokerService = undefined;
       }
+      // A session_start ready event may precede this reviewer's context.
+      // Register now if the service already exists; otherwise its real ready
+      // event will register us. This also covers pre-before_agent_start asks.
+      const sessionId = ctx.sessionManager.getSessionId();
+      if (getPermissionsService(sessionId)) registerPermissionAuthorizer({ sessionId });
     } catch (error) {
+      rpcAutoConfirmer.clear();
       context = undefined;
       broker = undefined;
       disposeBrokerService = undefined;
@@ -681,7 +694,9 @@ export function createPiAutoReviewExtension(
     // Pi 1.0.x omits aborted. Only an explicit cancellation revokes staged
     // allows and any one-shot UI interceptor left by that run.
     if ((event as { aborted?: unknown }).aborted === true) {
+      reviewGeneration++;
       uiAutoConfirmer.clear();
+      rpcAutoConfirmer.revoke();
     }
   });
 
@@ -695,7 +710,7 @@ export function createPiAutoReviewExtension(
     policyAudit.record(event as PermissionDecisionLike);
   });
 
-  pi.events.on("permissions:ready", (event) => {
+  function registerPermissionAuthorizer(event: unknown): void {
     const ready = event && typeof event === "object" && !Array.isArray(event)
       ? event as Record<string, unknown>
       : undefined;
@@ -709,6 +724,7 @@ export function createPiAutoReviewExtension(
       );
       return;
     }
+    if (!context || context.sessionManager.getSessionId() !== sessionId) return;
     if (registeredSessionId === sessionId && disposeAuthorizer) return;
 
     const epoch = ++registrationEpoch;
@@ -752,7 +768,7 @@ export function createPiAutoReviewExtension(
             return { kind: "deny", reason };
           }
 
-          const request = boundaryRequest(context, details, query);
+          const request = boundaryRequest(context, details, query, config.reviewRoots);
           const target = reviewTargetFromRequest(request);
           const reviewContext = context;
           const widgetGeneration = reviewWidget.begin(request.id, reviewContext, {
@@ -760,20 +776,27 @@ export function createPiAutoReviewExtension(
             target,
             model: config.model,
           });
+          const generation = reviewGeneration;
           const decision = await broker.review(request, {
             sessionId: reviewContext.sessionManager.getSessionId(),
             scopeKey: currentTurnScope(reviewContext),
             issueGrant: false,
           });
+          if (shuttingDown || context !== reviewContext || epoch !== registrationEpoch || generation !== reviewGeneration || reviewContext.signal?.aborted) {
+            reviewResults.delete(request.id);
+            return { kind: "deny", reason: "Review was cancelled by session shutdown or reload." };
+          }
           const result = reviewResults.get(request.id);
           reviewResults.delete(request.id);
           const allowCapped =
             decision.kind === "allow" && boundedRequest(surface);
           const autoConfirmQueued =
             allowCapped &&
-            reviewContext.mode === "tui" &&
             reviewContext.hasUI &&
-            uiAutoConfirmer.stage(request.id, surface);
+            (reviewContext.mode === "tui"
+              ? uiAutoConfirmer.stage(request.id, surface)
+              : reviewContext.mode === "rpc"
+                && rpcAutoConfirmer.stage(request.id, surface, details.payload));
 
           let userOutcome: UserReviewOutcome;
           if (decision.kind === "deny" && decision.circuitBreakerTripped) {
@@ -828,6 +851,7 @@ export function createPiAutoReviewExtension(
               decision.kind === "deny"
                 ? decision.circuitBreakerTripped
                 : false,
+            unavailable: result?.unavailable === true,
             attempts: result?.attempts ?? 0,
             retryErrors: result?.retryErrors ?? [],
             durationMs: result?.durationMs,
@@ -892,7 +916,8 @@ export function createPiAutoReviewExtension(
         }`,
       );
     }
-  });
+  }
+  pi.events.on("permissions:ready", registerPermissionAuthorizer);
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
@@ -907,6 +932,7 @@ export function createPiAutoReviewExtension(
     broker = undefined;
     reviewResults.clear();
     uiAutoConfirmer.clear();
+    rpcAutoConfirmer.clear();
     context = undefined;
     await policyAudit.close();
   });

@@ -13,12 +13,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/erichll/pi-packages.git",
+    "url": "git+https://github.com/jianyun8023/pi-auto-review-packages.git",
     "directory": "packages/pi-auto-review"
   },
-  "homepage": "https://github.com/erichll/pi-packages/tree/main/packages/pi-auto-review",
+  "homepage": "https://github.com/jianyun8023/pi-auto-review-packages",
   "bugs": {
-    "url": "https://github.com/erichll/pi-packages/issues"
+    "url": "https://github.com/jianyun8023/pi-auto-review-packages/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -57,5 +57,9 @@
     "@gotgenes/pi-permission-system": "^41.0.0",
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2"
+  },
+  "piWebFork": {
+    "repository": "jianyun8023/pi-auto-review-packages",
+    "compatibility": 2
   }
 }

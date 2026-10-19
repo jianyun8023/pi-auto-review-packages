@@ -32,6 +32,8 @@ export type Config = {
   grantTtlMs: number;
   autoConfirmBoundedAllows: readonly BoundedSurface[];
   policyAudit: Readonly<PolicyAuditConfig>;
+  /** User-global context only; project config cannot broaden these roots. */
+  reviewRoots?: readonly string[];
 };
 
 export type CompletionMessage = {

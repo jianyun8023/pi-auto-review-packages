@@ -538,3 +538,24 @@ The listener submits filesystem-write, network, delete, Git-push, and forwarded
 subagent boundaries. No represented operation is executed; the main-agent
 request is aborted after the samples finish. `--no-builtin-tools` ensures Bash
 comes from `pi-sandbox` rather than Pi's built-in implementation.
+
+## Jianyun Pi Web fork
+
+This fork is distributed with Pi Web as a hashed local npm artifact, retaining
+the upstream package identity and version. `piWebFork` and the release manifest
+identify the fork; a matching version alone is insufficient to verify it.
+
+Registration starts at `session_start` through the session-keyed permission
+service and ignores other sessions' readiness events. RPC supports bounded
+automatic confirmation and exact-retry recovery without impersonating TUI.
+
+The reviewer prompt explains Pi's `ask` delegation. `reviewRoots` is an optional
+global-only list of at most 16 absolute paths; host-observed installation paths
+and these configured roots identify task objects and grant no authority.
+Project configuration cannot broaden this list. The CJK token estimate is
+retained. No additional classifier service or credentials are required.
+
+`test/fixtures/local-review-cases.json` contains 21 de-identified observations.
+User intent is reconstructed for controlled replay; the original truncated
+composite operation remains expected to defer. Live model replay is separate
+from deterministic tests and never executes the represented operations.
