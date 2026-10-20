@@ -471,7 +471,7 @@ export function applyReviewerInputBudget(
 
   for (let index = 0; index < transcript.reviewerEvidence.relevantResults.length;) {
     const item = transcript.reviewerEvidence.relevantResults[index];
-    if (!item || item.reason === "sandbox-trap") {
+    if (!item || item.reason === "sandbox-trap" || item.reason === "assistant-proposal") {
       index++;
       continue;
     }

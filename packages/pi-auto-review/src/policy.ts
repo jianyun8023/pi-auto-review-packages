@@ -149,6 +149,8 @@ export type EvidenceSelectionReason =
   | "delete-precheck"
   | "git-push-context"
   | "provider-branch-protection"
+  | "assistant-proposal"
+  | "related-task-result"
   | "sandbox-trap";
 
 export type EvidenceSurfaceProfile =
@@ -161,7 +163,7 @@ export type EvidenceSurfaceProfile =
 export type EvidenceCandidateMetadata = {
   id: string;
   entryIndex: number;
-  kind: "user" | "tool-call" | "tool-result" | "sandbox-trap";
+  kind: "user" | "tool-call" | "tool-result" | "assistant-message" | "sandbox-trap";
   toolCallId?: string;
   reason: EvidenceSelectionReason;
   secondaryReasons: EvidenceSelectionReason[];
@@ -882,6 +884,33 @@ function resultText(message: Record<string, unknown>): string {
   return boundedString(redactSensitiveResult(text));
 }
 
+/** Public assistant text explains what a following user reply refers to. It
+ * stays untrusted context and is never merged into original user authority.
+ */
+function proposalEvidence(entries: readonly unknown[], users: Evidence[]) {
+  return users.flatMap((user) => {
+    for (let index = user.entryIndex - 1; index >= 0; index--) {
+      if (isSummaryEntry(entries[index])) break;
+      const message = messageRecord(entries[index]);
+      if (!message) continue;
+      if (["user", "compactionSummary", "branchSummary"].includes(String(message.role))) break;
+      if (message.role !== "assistant") continue;
+      const raw = typeof message.content === "string" ? message.content :
+        Array.isArray(message.content) ? message.content.flatMap(part =>
+          part && typeof part === "object" && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") : "";
+      if (!raw.trim()) continue;
+      const content = canonicalReviewerJson({ role: "assistant", precedesUserMessageId: user.id,
+        text: boundedString(redactSensitiveResult(raw.trim())), authority: "none" });
+      return [{ index, id: `${stableEntryId(entries[index], index)}:assistant-proposal`,
+        reason: "assistant-proposal" as const, toolCallId: undefined, content,
+        text: `<assistant-proposal>\n${escapeEvidenceMarkup(content)}\n</assistant-proposal>`,
+        rawCharacters: raw.length, sensitivity: "tool-output" as const,
+        preTruncated: raw.trim().length > MAX_EVIDENCE_ITEM_CHARACTERS }];
+    }
+    return [];
+  });
+}
+
 function commandArgument(call: ToolCallRecord): string {
   if (
     call.arguments &&
@@ -962,6 +991,7 @@ function relevanceReason(
   | "delete-precheck"
   | "git-push-context"
   | "provider-branch-protection"
+  | "related-task-result"
   | undefined {
   if (request.toolCallId && call.id === request.toolCallId) return "same-tool";
   const currentCommand = executionText(request) || "";
@@ -1003,6 +1033,15 @@ function relevanceReason(
   ) {
     return "provider-branch-protection";
   }
+  // Select facts about an explicitly matching target, never arbitrary recent
+  // output. The caller bounds the time window and pairs each result with its call.
+  const targetsInCommand = currentCommand.match(/(?:\/[A-Za-z0-9_.-]+){2,}|\b[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\b/g) ?? [];
+  const targetWords = [...targets, ...targetsInCommand];
+  const prior = `${priorCommand} ${call.rendered}`;
+  if (targetWords.some(target => target.length > 3 &&
+    new RegExp(`(^|[\\s\\"'=])${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[\\s\\"';,}])`).test(prior))) {
+    return "related-task-result";
+  }
   return undefined;
 }
 
@@ -1022,6 +1061,7 @@ function relevantResultEvidence(
     | "structured-request-match"
     | "security-combination"
     | "sandbox-trap"
+    | "assistant-proposal"
   >;
   call: ToolCallRecord;
   resultId: string;
@@ -1031,7 +1071,7 @@ function relevantResultEvidence(
   const calls = new Map<string, ToolCallRecord>();
   const results: Array<{
     index: number;
-    reason: "same-tool" | "delete-precheck" | "git-push-context" | "provider-branch-protection";
+    reason: "same-tool" | "delete-precheck" | "git-push-context" | "provider-branch-protection" | "related-task-result";
     call: ToolCallRecord;
     resultId: string;
     resultText: string;
@@ -1072,6 +1112,7 @@ function relevantResultEvidence(
     const call = calls.get(message.toolCallId);
     if (!call) return;
     const reason = relevanceReason(call, request);
+    if (reason === "related-task-result" && message.isError === true) return;
     const text = resultText(message);
     const crossTurnAllowed = reason === "same-tool";
     if (reason && text && (crossTurnAllowed || call.entryIndex >= currentTurnStart)) {
@@ -1366,6 +1407,7 @@ function selectRequestAwareTools(
     "delete-precheck",
     "git-push-context",
     "provider-branch-protection",
+    "related-task-result",
     "security-combination",
     "structured-request-match",
   ];
@@ -1443,6 +1485,7 @@ function capRelevantUnits(
     }
   };
   take("same-tool", 1);
+  take("related-task-result", 2);
   if (profile === "delete") take("delete-precheck", 2);
   if (profile === "git-push") {
     take("git-push-context", 1, (unit) =>
@@ -1463,6 +1506,34 @@ function capRelevantUnits(
     }
   }
   return selected.sort((left, right) => left.index - right.index);
+}
+
+/** Optional target observations are explicitly labelled excerpts. Truncation of
+ * mandatory action/user evidence still fails closed; an optional observation
+ * never claims to be the complete output or to establish authorization.
+ */
+function boundRelatedResults(units: ReturnType<typeof relevantResultEvidence>, budget: number) {
+  const count = units.filter(unit => unit.reason === "related-task-result").length;
+  if (!count) return units;
+  const quota = Math.floor(budget / count);
+  return units.flatMap(unit => {
+    if (unit.reason !== "related-task-result") return [unit];
+    const prefix = `<tool-result id="${escapeEvidenceMarkup(unit.call.id ?? "")}" reason="${unit.reason}" tool="${escapeEvidenceMarkup(unit.call.name)}">\n`;
+    const suffix = "\n</tool-result>";
+    const compact = unit.resultText.split("\n").map(line => line.trimEnd()).join("\n");
+    if (Buffer.byteLength(prefix + escapeEvidenceMarkup(compact) + suffix, "utf8") <= quota) {
+      return [{ ...unit, resultText: compact, renderedResult: prefix + escapeEvidenceMarkup(compact) + suffix }];
+    }
+    const notice = "[Optional result excerpt; not complete output]\n";
+    let available = quota - Buffer.byteLength(prefix + suffix + notice, "utf8");
+    if (available < 64) return [];
+    let text = notice + headTail(compact, available);
+    while (Buffer.byteLength(prefix + escapeEvidenceMarkup(text) + suffix, "utf8") > quota && available > 0) {
+      available -= 16;
+      text = notice + headTail(compact, available);
+    }
+    return [{ ...unit, resultText: text, renderedResult: prefix + escapeEvidenceMarkup(text) + suffix }];
+  });
 }
 
 function selectedMetadata(
@@ -1539,12 +1610,18 @@ function headTail(value: string, limit: number): string {
 function summaryEntryIndices(entries: readonly unknown[]): number[] {
   const indices: number[] = [];
   entries.forEach((entry, index) => {
-    const role = messageRecord(entry)?.role;
-    if (role === "compactionSummary" || role === "branchSummary") {
+    if (isSummaryEntry(entry)) {
       indices.push(index);
     }
   });
   return indices;
+}
+
+function isSummaryEntry(entry: unknown): boolean {
+  const type = record(entry)?.type;
+  const role = messageRecord(entry)?.role;
+  return type === "compaction" || type === "branch_summary" ||
+    role === "compactionSummary" || role === "branchSummary";
 }
 
 function containsExactIdentifier(text: string, value: string): boolean {
@@ -1724,16 +1801,16 @@ export function buildClassifierTranscript(
   const evidence = extractEvidence(entries);
   const profile = surfaceProfile(request);
   const turnStart = currentTurnStart(entries);
-  const relevantUnits = capRelevantUnits(
-    relevantResultEvidence(entries, request, turnStart),
+  const users = selectUserEvidence(entries, evidence, request, config.maxUserTranscriptTokens);
+  const proposals = proposalEvidence(entries, users.selected);
+  // A reply can refer to the preceding turn's proposal and its supporting facts.
+  const priorTurnStart = Math.max((summaryEntryIndices(entries).at(-1) ?? -1) + 1,
+    proposals.some(item => item.index < turnStart) ?
+      evidence.filter(item => item.kind === "user" && item.entryIndex < turnStart).at(-1)?.entryIndex ?? turnStart : turnStart);
+  const relevantUnits = boundRelatedResults(capRelevantUnits(
+    relevantResultEvidence(entries, request, priorTurnStart),
     profile,
-  );
-  const users = selectUserEvidence(
-    entries,
-    evidence,
-    request,
-    config.maxUserTranscriptTokens,
-  );
+  ), config.maxRelevantResultTokens ?? config.maxToolTranscriptTokens);
   const requestAwareTools = selectRequestAwareTools(
     entries,
     evidence,
@@ -1747,11 +1824,25 @@ export function buildClassifierTranscript(
   const mandatoryTools = requestAwareTools.selected.filter(item =>
     item.reason === "exact-tool-call" || item.reason === "security-combination" ||
     item.secondaryReasons.includes("security-combination"));
+  const optionalBudget = Math.max(0, config.maxToolTranscriptTokens - mandatoryTools.reduce(
+    (total, item) => total + Buffer.byteLength(item.text, "utf8"), 0));
+  const otherOptional = requestAwareTools.selected.filter(item =>
+    !mandatoryTools.includes(item) && item.reason !== "related-task-result");
+  let relatedRemaining = Math.max(0, optionalBudget - otherOptional.reduce(
+    (total, item) => total + Buffer.byteLength(item.text, "utf8"), 0));
+  const relatedTools = requestAwareTools.selected.filter(item =>
+    !mandatoryTools.includes(item) && item.reason === "related-task-result")
+    .sort((left, right) => right.entryIndex - left.entryIndex)
+    .filter(item => {
+      const bytes = Buffer.byteLength(item.text, "utf8");
+      if (bytes > relatedRemaining) return false;
+      relatedRemaining -= bytes;
+      return true;
+    });
   const optionalTools = selectEvidence(
-    requestAwareTools.selected.filter(item => !mandatoryTools.includes(item)),
+    [...otherOptional, ...relatedTools],
     "tool",
-    Math.max(0, config.maxToolTranscriptTokens - mandatoryTools.reduce(
-      (total, item) => total + Buffer.byteLength(item.text, "utf8"), 0)),
+    optionalBudget,
   );
   const tools = {
     selected: [...mandatoryTools, ...optionalTools.selected],
@@ -1762,6 +1853,7 @@ export function buildClassifierTranscript(
   const sandboxSupplement = sandboxTrapSupplement(request);
   const sandboxEvidence = sandboxTrapEvidence(request);
   const relevantCandidates = [
+    ...proposals,
     ...(sandboxEvidence && sandboxSupplement
       ? [{
           index: Number.MAX_SAFE_INTEGER - 1,
@@ -1789,15 +1881,19 @@ export function buildClassifierTranscript(
         sensitivity: "tool-output" as const,
       })),
   ];
-  let relevantRemaining = relevantBudget;
+  // Linked proposals have their own bounded allowance, so the small optional
+  // result budget cannot erase the referent of an otherwise retained user reply.
+  let relevantRemaining = relevantBudget + Math.min(config.maxUserTranscriptTokens,
+    proposals.reduce((total, item) => total + Buffer.byteLength(item.text, "utf8"), 0));
   let requiredProfileOverflow = false;
   const relevantSelected: Array<
     (typeof relevantCandidates)[number] & { selectedText: string }
   > = [];
   const relevantSelectionOrder = [
     ...relevantCandidates.filter((candidate) => candidate.reason === "sandbox-trap"),
+    ...relevantCandidates.filter((candidate) => candidate.reason === "assistant-proposal").sort((left, right) => right.index - left.index),
     ...relevantCandidates
-      .filter((candidate) => candidate.reason !== "sandbox-trap")
+      .filter((candidate) => !["sandbox-trap", "assistant-proposal"].includes(candidate.reason))
       .sort((left, right) => right.index - left.index),
   ];
   for (const candidate of relevantSelectionOrder) {
@@ -1826,6 +1922,7 @@ export function buildClassifierTranscript(
     "delete-precheck",
     "git-push-context",
     "provider-branch-protection",
+    "related-task-result",
   ]);
   const finalTools = tools.selected.filter((tool) => {
     if (!resultReasons.has(tool.reason)) return true;
@@ -1857,6 +1954,7 @@ export function buildClassifierTranscript(
     .filter(Boolean)
     .join("\n\n");
   const relevantTruncated =
+    proposals.some(item => item.preTruncated) ||
     relevantSelected.length < relevantCandidates.length ||
     relevantSelected.reduce(
       (total, value) => total + value.selectedText.length,
@@ -1934,7 +2032,7 @@ export function buildClassifierTranscript(
       ...relevantSelected.map((item) => ({
         id: item.id,
         entryIndex: item.index,
-        kind: item.sensitivity === "boundary" ? "sandbox-trap" as const : "tool-result" as const,
+        kind: item.reason === "assistant-proposal" ? "assistant-message" as const : item.sensitivity === "boundary" ? "sandbox-trap" as const : "tool-result" as const,
         ...(item.toolCallId ? { toolCallId: item.toolCallId } : {}),
         reason: item.reason,
         secondaryReasons: [],

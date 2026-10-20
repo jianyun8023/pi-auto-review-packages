@@ -357,16 +357,22 @@ The reviewer receives one compact canonical request plus bounded, explicitly
 untrusted evidence. Selection is deterministic rather than semantic:
 
 - the latest raw user message is the authorization anchor;
-- older user messages require an exact request/tool/requester association or an
-  exact trusted retry;
+- earlier original user messages remain in chronological order within the
+  user budget, including later restrictions and revocations;
 - tool calls require an exact tool-call ID, exact structured request fields, a
   surface profile, or a security-combination classification; and
 - selected results stay paired with their producer and are limited to exact
   results, deletion prechecks, Git push context, matching branch protection,
-  and Sandbox Runtime process evidence.
+  Sandbox Runtime process evidence, and bounded observations about matching
+  explicit targets.
 
-Unrelated reads, directory listings, builds, tests, assistant prose, and old
-task history are excluded. Compaction and branch summaries are labeled as
+Public assistant text immediately preceding a retained user reply is linked to
+that reply as `assistant-proposal` context with no authority of its own.
+It resolves what a user accepted or rejected without treating assistant text as
+consent or extending consent to other actions or targets.
+Hidden reasoning, future assistant messages, unrelated outputs, and proposals
+across a compaction boundary are excluded.
+Compaction and branch summaries are labeled as
 non-authorization context and are never injected as user intent. The host does
 not rewrite a model allow from regex matches on user text, vague continuations,
 or a computed authorization ceiling; those judgments stay with the reviewer
@@ -381,15 +387,21 @@ audit evidence.
 `maxReviewerInputTokens` covers the fixed policy, canonical request, override,
 evidence, omissions, JSON framing, and a 64-token provider-framing reserve. Its
 legal range is 2,048–32,768. Because no matching tokenizer is bundled, the
-`conservative:utf8` estimator counts every UTF-8 byte as one token.
+`conservative:cjk-aware` estimator accounts separately for CJK and other text.
 
 When over budget, the host removes secondary reasons, older structured tool
 matches, then optional producer/result units, re-estimating after each step. It
 never silently removes the canonical request, exact override, latest user
-evidence, security-combination evidence, exact tool linkage, or a required
+evidence, linked assistant proposals, security-combination evidence, exact tool linkage, or a required
 surface profile. If mandatory evidence does not fit, review fails closed before
 calling the model. More than four security-combination candidates also fails
 closed locally.
+
+Optional related results are explicitly labelled excerpts when shortened.
+They remain paired with the complete producer call; a producer that cannot fit
+the optional tool budget is excluded together with its result.
+Proposals use a separate allowance bounded by `maxUserTranscriptTokens`, and
+the combined request still has to fit `maxReviewerInputTokens`.
 
 ## Sandbox integration
 
@@ -548,6 +560,17 @@ identify the fork; a matching version alone is insufficient to verify it.
 Registration starts at `session_start` through the session-keyed permission
 service and ignores other sessions' readiness events. RPC supports bounded
 automatic confirmation and exact-retry recovery without impersonating TUI.
+
+Whole-invocation model allows with high user authorization and low/medium risk
+can be reused for 30 seconds within the same native file or Bash tool call.
+Bash reuse binds the complete command and arguments, session, canonical cwd,
+original messages, reviewer configuration and global/project permission files.
+Each newly encountered path still needs review; previously reviewed path
+identities are checked again, including changes while the model was running.
+Unknown relative path context, parser floors, forwarded calls, incomplete
+evidence, cancellation and changed inputs do not reuse an approval.
+This cache does not reuse a human's directory-only approval and every gate still
+executes deterministic deny rules and the configured bounded auto-confirm policy.
 
 The reviewer prompt explains Pi's `ask` delegation. `reviewRoots` is an optional
 global-only list of at most 16 absolute paths; host-observed installation paths
