@@ -1068,9 +1068,9 @@ test("real permission-system authorizer chain integration", async (t) => {
       });
       const context = reviewerTranscript(instance.modelContexts.at(-1));
       assert.equal(context.messages.length, 2);
-      // Loose guard against unbounded prompt growth; the #910 matchedSpelling
-      // sentence sits at ~2.0k characters, so keep headroom for doc tweaks.
-      assert.ok(context.systemPrompt.length < 3_500);
+      // Guard prompt growth while allowing concrete task-preparation and
+      // credential/process boundaries; the total input budget is enforced too.
+      assert.ok(context.systemPrompt.length < 4_000);
       assert.equal(context.systemPrompt.match(/"outcome"/g)?.length, 1);
       assert.match(context.systemPrompt, /\$HOME/);
       assert.match(
