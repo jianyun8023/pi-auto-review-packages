@@ -176,7 +176,7 @@ export function sharedReviewContext(
       },
       userMessages: {
         items: transcript.reviewerEvidence.userMessages,
-        trust: "untrusted",
+        trust: "original-user-authorization",
       },
     },
     omissions: {

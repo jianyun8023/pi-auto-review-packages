@@ -139,6 +139,7 @@ export type EvidenceSensitivity =
 
 export type EvidenceSelectionReason =
   | "latest-user"
+  | "prior-user"
   | "exact-request-reference"
   | "trusted-retry-user-message"
   | "exact-tool-call"
@@ -1014,6 +1015,7 @@ function relevantResultEvidence(
   reason: Exclude<
     EvidenceSelectionReason,
     | "latest-user"
+    | "prior-user"
     | "exact-request-reference"
     | "trusted-retry-user-message"
     | "exact-tool-call"
@@ -1632,11 +1634,13 @@ function selectUserEvidence(
         ),
     );
     const exactReference = exactUserReference(candidate.text, request);
-    if (!trustedRetry && !exactReference) continue;
+    // Retain a contiguous suffix of original user messages. Skipping a large
+    // intervening message could revive an older authorization it revoked.
+    if (candidate.preTruncated || Buffer.byteLength(candidate.text, "utf8") > remaining) break;
     const reason: EvidenceSelectionReason = trustedRetry
       ? "trusted-retry-user-message"
-      : "exact-request-reference";
-    const text = headTail(candidate.text, remaining);
+      : exactReference ? "exact-request-reference" : "prior-user";
+    const text = candidate.text;
     if (!text) continue;
     selected.push({
       ...candidate,
@@ -1737,11 +1741,22 @@ export function buildClassifierTranscript(
     relevantUnits,
     turnStart,
   );
-  const tools = selectEvidence(
-    requestAwareTools.selected,
+  // The current call and security-critical evidence are mandatory, not
+  // optional history. Keep them whole; the final shared input budget either
+  // fits them or fails closed before a model sees an incomplete action.
+  const mandatoryTools = requestAwareTools.selected.filter(item =>
+    item.reason === "exact-tool-call" || item.reason === "security-combination" ||
+    item.secondaryReasons.includes("security-combination"));
+  const optionalTools = selectEvidence(
+    requestAwareTools.selected.filter(item => !mandatoryTools.includes(item)),
     "tool",
-    config.maxToolTranscriptTokens,
+    Math.max(0, config.maxToolTranscriptTokens - mandatoryTools.reduce(
+      (total, item) => total + Buffer.byteLength(item.text, "utf8"), 0)),
   );
+  const tools = {
+    selected: [...mandatoryTools, ...optionalTools.selected],
+    truncated: optionalTools.truncated || mandatoryTools.some(item => item.preTruncated),
+  };
   const relevantBudget =
     config.maxRelevantResultTokens ?? config.maxToolTranscriptTokens;
   const sandboxSupplement = sandboxTrapSupplement(request);
@@ -1931,7 +1946,7 @@ export function buildClassifierTranscript(
         sensitivity: item.sensitivity,
       })),
     ].sort((left, right) => left.entryIndex - right.entryIndex),
-    ...(requestAwareTools.criticalEvidenceOverflow
+    ...(requestAwareTools.criticalEvidenceOverflow || mandatoryTools.some(item => item.preTruncated)
       ? { failureCode: "critical_evidence_overflow" as const }
       : requiredProfileOverflow
         ? { failureCode: "required_profile_overflow" as const }

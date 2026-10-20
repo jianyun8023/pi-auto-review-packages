@@ -27,6 +27,8 @@ import type {
   ReviewerTelemetryEvent,
 } from "./types.ts";
 import { FORMAT_RETRY_INSTRUCTION } from "./consts.ts";
+import { classifyReview } from "./classifier.ts";
+import type { InvocationReviewCache } from "./reuse.ts";
 import {
   applyReviewerInputBudget,
   preflightPart,
@@ -61,6 +63,7 @@ export async function complete(
   reviewerContext?: BoundaryReviewerContext,
   resolve: ReviewerResolver = resolveReviewerMeta,
   observe?: (event: ReviewerTelemetryEvent) => void,
+  reuse?: InvocationReviewCache,
 ): Promise<ReviewResult> {
   const started = Date.now();
   const selectedTranscript = buildClassifierTranscript(
@@ -90,6 +93,11 @@ export async function complete(
     sharedContext,
     config.maxReviewerInputTokens,
   );
+  const reuseKey = reuse?.key(ctx, config, request, transcript, reviewerContext);
+  const finish = (result: ReviewResult): ReviewResult => {
+    if (!controller.signal.aborted) reuse?.remember(reuseKey, request.id, result);
+    return result;
+  };
   // Hard denies already ran on the raw text plus bounded payloads. An
   // incomplete expansion must reach the human terminal, even with a trusted
   // reviewer-retry override. The older display-truncation fallback can still
@@ -158,6 +166,38 @@ export async function complete(
     if (controller.signal.aborted) {
       incrementError(errorCounts, "abort");
       throw new ReviewExecutionError("abort", summary());
+    }
+    const reused = reuse?.get(reuseKey);
+    if (reused) {
+      return {
+        decision: { ...reused.result.decision }, attempts: 0, retryErrors: [],
+        durationMs: Date.now() - started, transcript,
+        summary: { ...summary(), reusedReview: {
+          requestId: reused.requestId,
+          model: reused.result.summary.attempts.at(-1)?.model ?? config.model,
+        } },
+      };
+    }
+    if (config.classifier) {
+      const classified = await classifyReview(
+        ctx, config.classifier, sharedContext, controller.signal,
+        !transcript.truncated && !transcript.failureCode &&
+          transcript.userAuthorizationCeiling !== "unknown" &&
+          request.toolName !== "codemode" && !reviewerContext?.userOverride,
+        config.maxReviewerInputTokens,
+      );
+      attempts.push(classified.observation);
+      observe?.({ type: "review_attempt", requestId: request.id, surface: request.surface, ...classified.observation });
+      if (classified.observation.errorClass !== "none") incrementError(errorCounts, classified.observation.errorClass);
+      if (controller.signal.aborted) {
+        const errorClass = timeoutFired ? "timeout" : "abort";
+        incrementError(errorCounts, errorClass);
+        throw new ReviewExecutionError(errorClass, summary());
+      }
+      if (classified.decision) return finish({
+        decision: classified.decision, attempts: attempts.length, retryErrors: [],
+        durationMs: Date.now() - started, transcript, summary: summary(),
+      });
     }
     let meta: ReviewerMeta;
     try {
@@ -283,6 +323,7 @@ export async function complete(
         !controller.signal.aborted &&
         deadlineAt - Date.now() > delayMs;
       const observation: ReviewAttemptObservation = {
+        stage: "reviewer",
         attempt: attempts.length + 1,
         model: message?.responseModel || `${meta.model.provider}/${meta.model.id}`,
         status,
@@ -301,14 +342,14 @@ export async function complete(
         ...observation,
       });
       if (decision) {
-        return {
+        return finish({
           decision,
           attempts: attempts.length,
           retryErrors,
           durationMs: Date.now() - started,
           transcript,
           summary: summary(),
-        };
+        });
       }
       lastErrorClass = errorClass;
       retryErrors.push(errorClass);

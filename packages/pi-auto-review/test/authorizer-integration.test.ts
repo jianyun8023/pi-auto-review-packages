@@ -1070,7 +1070,7 @@ test("real permission-system authorizer chain integration", async (t) => {
       assert.equal(context.messages.length, 2);
       // Loose guard against unbounded prompt growth; the #910 matchedSpelling
       // sentence sits at ~2.0k characters, so keep headroom for doc tweaks.
-      assert.ok(context.systemPrompt.length < 2_800);
+      assert.ok(context.systemPrompt.length < 3_500);
       assert.equal(context.systemPrompt.match(/"outcome"/g)?.length, 1);
       assert.match(context.systemPrompt, /\$HOME/);
       assert.match(
@@ -1127,7 +1127,7 @@ test("real permission-system authorizer chain integration", async (t) => {
         items: Array<Record<string, unknown>>;
         trust: string;
       }>;
-      assert.equal(evidence.userMessages.trust, "untrusted");
+      assert.equal(evidence.userMessages.trust, "original-user-authorization");
       assert.equal(evidence.toolCalls.trust, "untrusted");
       assert.equal(evidence.relevantResults.trust, "untrusted");
       assert.match(
@@ -2240,7 +2240,7 @@ test("real permission-system authorizer chain integration", async (t) => {
     }
   });
 
-  await t.test("older prohibition text does not enter evidence or rewrite allow", async () => {
+  await t.test("older prohibition reaches the reviewer alongside the latest request", async () => {
     const instance = harness(allow, {
       contextEntries: [
         {
@@ -2265,7 +2265,7 @@ test("real permission-system authorizer chain integration", async (t) => {
       });
       assert.equal(result.decision.approved, true);
       const rendered = JSON.stringify(instance.modelContexts.at(-1));
-      assert.doesNotMatch(rendered, /不要改这些文件/);
+      assert.match(rendered, /不要改这些文件/);
       assert.match(rendered, /漏掉的图片/);
       const completion = instance.telemetry.find(
         (event) => event.type === "review_complete",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,7 +63,6 @@ bunTest("Node and Bun share a WAL database, HMAC key, and cross-process deduplic
     store.close();
     assert.deepEqual(await bunWriter(root, "shared"), { recorded: false, total: 4 });
     assert.deepEqual(readFileSync(join(root, "policy-audit.key")), key);
-    assert.equal(existsSync(join(root, "policy-audit.sqlite-wal")), false);
   } finally {
     store?.close();
     rmSync(root, { recursive: true, force: true });
@@ -71,7 +70,9 @@ bunTest("Node and Bun share a WAL database, HMAC key, and cross-process deduplic
 });
 
 bunTest("Bun-compiled Pi loads the audit backend and produces a persistent report", { timeout: 60_000 }, async () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-audit-compiled-"));
+  // Bun canonicalizes cwd on macOS (/var -> /private/var); use the same
+  // project identity for the later Node query instead of a symlink alias.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-audit-compiled-")));
   const piDist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
   const auditModule = fileURLToPath(new URL("../src/policy-audit/index.ts", import.meta.url));
   const binary = join(root, "pi");

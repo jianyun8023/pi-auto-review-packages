@@ -1078,7 +1078,7 @@ test("latest user truncation preserves head and tail", () => {
   }]);
 });
 
-test("older prohibition text is not selected without an exact request reference", () => {
+test("older prohibition remains available alongside a later task instruction", () => {
   const transcript = buildClassifierTranscript(
     [
       {
@@ -1093,16 +1093,16 @@ test("older prohibition text is not selected without an exact request reference"
     { maxUserTranscriptTokens: 100, maxToolTranscriptTokens: 400 },
     { command: "git push origin HEAD:main" },
   );
-  assert.doesNotMatch(transcript.text, /Do not push to main/);
+  assert.match(transcript.text, /Do not push to main/);
   assert.equal(transcript.userConstraint, "none");
   assert.equal(transcript.userAuthorizationCeiling, "high");
   assert.deepEqual(
     transcript.selectedCandidates.map((candidate) => [candidate.id, candidate.reason]),
-    [["entry:latest:user", "latest-user"]],
+    [["entry:constraint:user", "prior-user"], ["entry:latest:user", "latest-user"]],
   );
 });
 
-test("older user evidence requires an exact request identifier", () => {
+test("older user evidence preserves chronology and exact-reference metadata", () => {
   const transcript = buildClassifierTranscript(
     [
       {
@@ -1122,10 +1122,10 @@ test("older user evidence requires an exact request identifier", () => {
     { id: "request-42", surface: "network", destination: "example.com:443" },
   );
   assert.match(transcript.text, /Approve only request-42/);
-  assert.doesNotMatch(transcript.text, /similar request/);
+  assert.match(transcript.text, /similar request/);
   assert.deepEqual(
     transcript.selectedCandidates.map((candidate) => candidate.reason),
-    ["exact-request-reference", "latest-user"],
+    ["exact-request-reference", "prior-user", "latest-user"],
   );
 });
 
@@ -1703,4 +1703,34 @@ test("Sandbox Runtime adds no trap block when the canonical request is complete"
   );
   assert.doesNotMatch(transcript.text, /<sandbox-trap>/);
   assert.equal(transcript.failureCode, undefined);
+});
+
+test("continuation retains original PR authorization and subsequent restrictions in order", () => {
+  const messages = ["需要开新的分支，最终提交 PR", "暂时不要推送，也不要创建 PR", "继续处理这个项目"];
+  const transcript = buildClassifierTranscript(messages.map(content => ({ message: { role: "user", content } })),
+    { maxUserTranscriptTokens: 8000, maxToolTranscriptTokens: 1200 });
+  assert.deepEqual(transcript.reviewerEvidence.userMessages.map(item => item.content), messages);
+  assert.equal(transcript.truncated, false);
+});
+
+test("a missing intervening user message never resurrects older authorization", () => {
+  const transcript = buildClassifierTranscript([
+    { message: { role: "user", content: "Push and open a PR" } },
+    { message: { role: "user", content: `Do not push ${"x".repeat(200)}` } },
+    { message: { role: "user", content: "Continue" } },
+  ], { maxUserTranscriptTokens: 60, maxToolTranscriptTokens: 100 });
+  assert.deepEqual(transcript.reviewerEvidence.userMessages.map(item => item.content), ["Continue"]);
+});
+
+test("current edit keeps its complete patch even when it exceeds optional tool history budget", () => {
+  const newText = `START-${"documentation ".repeat(300)}-END`;
+  const transcript = buildClassifierTranscript([
+    { message: { role: "user", content: "Update the documentation" } },
+    { message: { role: "assistant", content: [{ type: "toolCall", id: "edit-current", name: "edit",
+      arguments: { path: "/repo/docs/workflow.md", oldText: "old", newText } }] } },
+  ], { maxUserTranscriptTokens: 8000, maxToolTranscriptTokens: 1200 },
+  { toolCallId: "edit-current", path: "/repo/docs/workflow.md", surface: "path_write" });
+  const call = JSON.parse(transcript.reviewerEvidence.toolCalls[0]!.content);
+  assert.equal(call.supplement.newText, newText);
+  assert.equal(transcript.selectedCandidates.find(item => item.reason === "exact-tool-call")?.truncated, false);
 });

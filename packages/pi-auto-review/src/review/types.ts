@@ -16,9 +16,17 @@ export type ReasoningLevel =
 
 export type BoundedSurface = "external_directory" | "path";
 
+export type ClassifierConfig = Readonly<{
+  model: string;
+  timeoutMs: number;
+  minConfidence: number;
+}>;
+
 export type Config = {
   /** Model id, provider/model, or "current" for the live Pi session model. */
   model: string;
+  /** Optional native classifier before the chat reviewer; trusted config only. */
+  classifier?: ClassifierConfig;
   reasoning: ReasoningLevel;
   timeoutMs: number;
   maxTokens: number;
@@ -97,6 +105,15 @@ export type ReviewErrorClass =
   | "unknown";
 
 export type ReviewAttemptObservation = {
+  stage?: "classifier" | "reviewer";
+  classification?: {
+    effect?: string;
+    confidence?: number;
+    authorization?: string;
+    risk?: string;
+    scores?: { effect: number; authorization: number; risk: number };
+    route: "allow" | "reviewer";
+  };
   attempt: number;
   model: string;
   status: ReviewAttemptStatus;
@@ -125,6 +142,7 @@ export type ReviewPreflight = {
 };
 
 export type ReviewExecutionSummary = {
+  reusedReview?: { requestId: string; model: string };
   attempts: ReviewAttemptObservation[];
   errorCounts: Partial<Record<Exclude<ReviewErrorClass, "none">, number>>;
   durationMs: number;
@@ -147,6 +165,7 @@ export type ReviewerTelemetryEvent =
       outcome: "allow" | "deny" | "defer";
       failureMode?: "deny" | "defer";
       attempts: number;
+      reusedReview?: { requestId: string; model: string };
       errorCounts: ReviewExecutionSummary["errorCounts"];
       durationMs: number;
       usageAvailability: UsageAvailability;

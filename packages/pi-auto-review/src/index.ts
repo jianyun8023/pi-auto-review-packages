@@ -89,6 +89,7 @@ import {
   type ReviewerTelemetryEvent,
 } from "./review/index.ts";
 import { ReviewExecutionError } from "./review/index.ts";
+import { InvocationReviewCache } from "./review/reuse.ts";
 
 export {
   applyProjectConfig,
@@ -223,6 +224,7 @@ export function createPiAutoReviewExtension(
   let shuttingDown = false;
   let disposeBrokerService: (() => void) | undefined;
   const reviewResults = new Map<string, ReviewResult>();
+  const invocationReviews = new InvocationReviewCache();
   const telemetryCompleted = new Set<string>();
   let broker: BoundaryApprovalBroker | undefined;
   // Reviewer metadata is re-resolved per review (see ReviewerMeta above),
@@ -304,6 +306,7 @@ export function createPiAutoReviewExtension(
             reviewerContext,
             resolveReviewerMeta,
             emitTelemetry,
+            invocationReviews,
           );
           if (request.source === "permission-system") {
             reviewResults.set(request.id, result);
@@ -854,6 +857,9 @@ export function createPiAutoReviewExtension(
             unavailable: result?.unavailable === true,
             attempts: result?.attempts ?? 0,
             retryErrors: result?.retryErrors ?? [],
+            reusedFromRequestId: result?.summary.reusedReview?.requestId,
+            reviewStages: result?.summary.attempts.map(({ stage, model, status, classification, durationMs }) =>
+              ({ stage, model, status, classification, durationMs })),
             durationMs: result?.durationMs,
             usageAvailability: reviewMeta.usage?.availability,
             usage: reviewMeta.usage,

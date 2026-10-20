@@ -327,6 +327,7 @@ export function userReviewMetaFromResult(
   const attempts = result.summary.attempts;
   const aggregate = aggregateUsage(attempts);
   return {
+    ...(result.summary.reusedReview ? { model: result.summary.reusedReview.model } : {}),
     ...(attempts.length > 0
       ? {
           model: attempts.at(-1)?.model ?? fallbackModel,
@@ -353,11 +354,12 @@ export function completeTelemetry(
     type: "review_complete",
     requestId: request.id,
     surface: request.surface,
-    model: summary.attempts.at(-1)?.model ?? config.model,
+    model: summary.reusedReview?.model ?? summary.attempts.at(-1)?.model ?? config.model,
     reasoning: config.reasoning,
     outcome,
     ...(failureMode ? { failureMode } : {}),
     attempts: summary.attempts.length,
+    ...(summary.reusedReview ? { reusedReview: { ...summary.reusedReview } } : {}),
     errorCounts: { ...summary.errorCounts },
     durationMs: summary.durationMs,
     usageAvailability: aggregate.availability,

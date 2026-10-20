@@ -38,6 +38,7 @@ export function validateConfig(value: unknown, source: string): Config {
   const raw = value as Partial<Config> & Record<string, unknown>;
   const allowedKeys = new Set([
     "model",
+    "classifier",
     "reasoning",
     "timeoutMs",
     "maxTokens",
@@ -60,6 +61,18 @@ export function validateConfig(value: unknown, source: string): Config {
     );
   }
   const config = { ...DEFAULT_CONFIG, ...raw };
+  if (raw.classifier !== undefined) {
+    const classifier = raw.classifier;
+    if (!classifier || typeof classifier !== "object" || Array.isArray(classifier) ||
+      Object.keys(classifier).some(key => !["model", "timeoutMs", "minConfidence"].includes(key)) ||
+      typeof classifier.model !== "string" || !/^[^\s/]+\/[^\s]+$/.test(classifier.model) ||
+      classifier.model.split("/").some(segment => !segment) ||
+      !Number.isInteger(classifier.timeoutMs) || classifier.timeoutMs < 100 || classifier.timeoutMs > 15_000 ||
+      !Number.isFinite(classifier.minConfidence) || classifier.minConfidence < 0.95 || classifier.minConfidence > 1) {
+      throw new Error(`${EXTENSION_NAME}: classifier requires provider/model, timeoutMs 100..15000, minConfidence 0.95..1`);
+    }
+    config.classifier = Object.freeze({ ...classifier });
+  }
   if (raw.reviewRoots !== undefined && (!Array.isArray(raw.reviewRoots) || raw.reviewRoots.length > 16 || raw.reviewRoots.some(root => typeof root !== "string" || root.length > 1024 || !isAbsolute(root)))) throw new Error(`${EXTENSION_NAME}: reviewRoots must contain at most 16 absolute paths`);
   config.policyAudit = {
     ...DEFAULT_CONFIG.policyAudit,

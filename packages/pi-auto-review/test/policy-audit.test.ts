@@ -254,7 +254,7 @@ test("two WAL stores share deduplication without duplicate statistics", async ()
   }
 });
 
-test("closing SQLite finalizes statements and checkpoints the last WAL connection", () => {
+test("closing SQLite finalizes statements and preserves committed data on reopen", () => {
   const root = temp("pi-audit-close-");
   try {
     const path = join(root, "audit.sqlite");
@@ -265,8 +265,11 @@ test("closing SQLite finalizes statements and checkpoints the last WAL connectio
     insert.run("persisted-marker");
     assert.equal(select.get()?.value, "persisted-marker");
     db.close();
-    assert.equal(existsSync(`${path}-wal`), false);
-    assert.ok(readFileSync(path).includes("persisted-marker"));
+    // macOS's system SQLite uses persistent WAL. File absence is not a
+    // portable durability contract; verify the committed row after reopening.
+    const reopened = new DatabaseSync(path);
+    try { assert.equal(reopened.prepare("SELECT value FROM test").get()?.value, "persisted-marker"); }
+    finally { reopened.close(); }
     assert.throws(() => insert.run("after-close"));
   } finally {
     rmSync(root, { recursive: true, force: true });
