@@ -860,10 +860,11 @@ test("the reviewer request view truncates command facts and flags it", () => {
   });
   assert.equal(view.fullCommandTruncated, true);
   assert.equal(
-    Buffer.byteLength(view.fullCommand ?? "", "utf8"),
+    Buffer.byteLength(view.command ?? "", "utf8"),
     MAX_REVIEWER_COMMAND_BYTES,
   );
-  assert.equal(view.command, "python3");
+  assert.equal(view.matchedCommand, "python3");
+  assert.equal(view.fullCommand, undefined);
 
   const small = reviewerRequestView({
     id: "reviewer-view",
@@ -875,7 +876,12 @@ test("the reviewer request view truncates command facts and flags it", () => {
     fullCommand: "python3 - <<'PY'",
   });
   assert.equal(small.fullCommandTruncated, undefined);
-  assert.equal(small.fullCommand, "python3 - <<'PY'");
+  assert.equal(small.command, "python3 - <<'PY'");
+  assert.equal(small.matchedCommand, "python3");
+  assert.equal(reviewerRequestView({
+    id: "unwrapped-only", source: "permission-system", surface: "bash",
+    operation: "tool", cwd: "/tmp", executedUnit: "true",
+  }).command, "true");
 });
 
 test("an exact tool call carrying the whole program is covered by executionText", () => {
@@ -900,7 +906,7 @@ test("an exact tool call carrying the whole program is covered by executionText"
   );
   assert.match(transcript.text, /exact-tool-call/);
   assert.doesNotMatch(transcript.text, /print\(1\)/);
-  assert.doesNotMatch(transcript.text, /supplement/);
+  assert.equal(JSON.parse(transcript.reviewerEvidence.toolCalls[0]!.content).supplement, undefined);
 });
 
 test("prompt-injection markup cannot escape transcript evidence tags", () => {
@@ -1354,7 +1360,7 @@ test("request-aware selector keeps the exact call and drops unrelated current-tu
   assert.doesNotMatch(transcript.text, /npm install exact-package/);
   assert.match(
     transcript.text,
-    /\{"id":"exact","name":"bash","reason":"exact-tool-call"\}/,
+    /"id":"exact","name":"bash","reason":"exact-tool-call"/,
   );
   assert.doesNotMatch(transcript.text, /cat package\.json|ls -la|npm run build|npm test/);
   const tools = transcript.selectedCandidates.filter(
@@ -1366,7 +1372,7 @@ test("request-aware selector keeps the exact call and drops unrelated current-tu
   );
   assert.equal(
     tools[0]?.selectedCharacters,
-    '{"id":"exact","name":"bash","reason":"exact-tool-call"}'.length,
+    transcript.reviewerEvidence.toolCalls[0]!.content.length,
   );
   assert.equal(tools[0]?.truncated, false);
 });
@@ -1400,7 +1406,7 @@ test("exact call keeps only request-missing arguments as a supplement", () => {
   assert.doesNotMatch(transcript.text, /touch \/tmp\/reviewed/);
   assert.match(
     transcript.text,
-    /\{"id":"exact-extra","name":"bash","reason":"exact-tool-call","supplement":\{"environment":\{"RELEASE_CHANNEL":"staging"\}\}\}/,
+    /"supplement":\{"environment":\{"RELEASE_CHANNEL":"staging"\}\}/,
   );
 });
 

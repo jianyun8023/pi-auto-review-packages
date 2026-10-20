@@ -824,6 +824,7 @@ type ToolCallRecord = {
   rendered: string;
   entryIndex: number;
   candidateId: string;
+  publicActionContext?: string;
 };
 
 function messageRecord(entry: unknown): Record<string, unknown> | undefined {
@@ -1038,11 +1039,31 @@ function relevanceReason(
   const targetsInCommand = currentCommand.match(/(?:\/[A-Za-z0-9_.-]+){2,}|\b[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\b/g) ?? [];
   const targetWords = [...targets, ...targetsInCommand];
   const prior = `${priorCommand} ${call.rendered}`;
-  if (targetWords.some(target => target.length > 3 &&
+  if (sharedContainerTarget(currentCommand, priorCommand) || targetWords.some(target => target.length > 3 &&
     new RegExp(`(^|[\\s\\"'=])${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[\\s\\"';,}])`).test(prior))) {
     return "related-task-result";
   }
   return undefined;
+}
+
+/** Retrieval hints only: a shared literal container name selects untrusted
+ * observations, never proves ownership, execution success or authorization.
+ * This is a textual hint, not shell execution analysis; full producer commands
+ * stay paired so the reviewer can reject inert literals or different contexts.
+ */
+function sharedContainerTarget(current: string, prior: string, setupOnly = false): boolean {
+  const targets = (command: string, onlySetup = false) => {
+    const names = new Set<string>();
+    for (const match of onlySetup ? [] : command.matchAll(/(?:^|[\n;&|]\s*)\s*docker\s+(?:container\s+)?(?:exec|logs|inspect|rm|stop)\s+(?:-(?:f|i|t|it|ti)\s+)*([A-Za-z0-9][A-Za-z0-9_.-]*)(?=\s|$)/g)) {
+      if (match[1]) names.add(match[1]);
+    }
+    for (const match of command.matchAll(/(?:^|[\n;&|]\s*)\s*docker\s+(?:container\s+)?(?:run|create)\s+[^\n;&|]*?--name(?:=|\s+)([A-Za-z0-9][A-Za-z0-9_.-]*)(?=\s|$)/g)) {
+      if (match[1]) names.add(match[1]);
+    }
+    return names;
+  };
+  const currentNames = targets(current);
+  return [...targets(prior, setupOnly)].some(name => currentNames.has(name));
 }
 
 function relevantResultEvidence(
@@ -1176,9 +1197,14 @@ function collectToolCalls(entries: readonly unknown[]): ToolCallRecord[] {
   entries.forEach((entry, entryIndex) => {
     const message = messageRecord(entry);
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
+    let publicActionContext = "";
     for (const part of message.content) {
       if (!part || typeof part !== "object" || Array.isArray(part)) continue;
       const value = part as Record<string, unknown>;
+      if (value.type === "text" && typeof value.text === "string") {
+        publicActionContext += `${value.text}\n`;
+        continue;
+      }
       if (value.type !== "toolCall" || typeof value.name !== "string") continue;
       const id =
         typeof value.id === "string"
@@ -1191,6 +1217,9 @@ function collectToolCalls(entries: readonly unknown[]): ToolCallRecord[] {
         name: value.name,
         arguments: value.arguments,
         rendered: `${value.name} ${boundedString(value.arguments ?? {})}`,
+        ...(publicActionContext.trim() ? {
+          publicActionContext: redactSensitiveResult(publicActionContext.trim()).slice(0, 1000),
+        } : {}),
         entryIndex,
         candidateId: id
           ? `tool-call:${id}`
@@ -1325,6 +1354,12 @@ function exactToolCallReviewerRepresentation(
     id: call.id,
     name: call.name,
     reason,
+    argumentRepresentation: "Complete arguments are in request fields plus supplement; duplicate values are omitted here, not missing.",
+    ...(typeof args.command === "string" && args.command === executionText(request)
+      ? { argumentsFromRequest: { command: "command" } } : {}),
+    ...(call.publicActionContext ? {
+      publicActionContext: { authority: "none", role: "assistant", text: call.publicActionContext },
+    } : {}),
     ...(Object.keys(supplement).length > 0 ? { supplement } : {}),
   });
 }
@@ -1461,6 +1496,7 @@ function selectRequestAwareTools(
 function capRelevantUnits(
   units: ReturnType<typeof relevantResultEvidence>,
   profile: EvidenceSurfaceProfile,
+  request: RelevantBoundaryRequest,
 ): ReturnType<typeof relevantResultEvidence> {
   const newest = [...units].sort((left, right) => right.index - left.index);
   const selected: typeof units = [];
@@ -1485,6 +1521,11 @@ function capRelevantUnits(
     }
   };
   take("same-tool", 1);
+  // Keep the first matching setup alongside a recent observation. Repeated
+  // probes alone cannot explain the service body or the mount/port boundaries.
+  const setup = units.find(unit => unit.reason === "related-task-result" &&
+    sharedContainerTarget(executionText(request) ?? "", commandArgument(unit.call), true));
+  if (setup) selected.push(setup);
   take("related-task-result", 2);
   if (profile === "delete") take("delete-precheck", 2);
   if (profile === "git-push") {
@@ -1807,10 +1848,11 @@ export function buildClassifierTranscript(
   const priorTurnStart = Math.max((summaryEntryIndices(entries).at(-1) ?? -1) + 1,
     proposals.some(item => item.index < turnStart) ?
       evidence.filter(item => item.kind === "user" && item.entryIndex < turnStart).at(-1)?.entryIndex ?? turnStart : turnStart);
-  const relevantUnits = boundRelatedResults(capRelevantUnits(
+  const relevantUnits = capRelevantUnits(
     relevantResultEvidence(entries, request, priorTurnStart),
     profile,
-  ), config.maxRelevantResultTokens ?? config.maxToolTranscriptTokens);
+    request,
+  );
   const requestAwareTools = selectRequestAwareTools(
     entries,
     evidence,
@@ -1828,28 +1870,40 @@ export function buildClassifierTranscript(
     (total, item) => total + Buffer.byteLength(item.text, "utf8"), 0));
   const otherOptional = requestAwareTools.selected.filter(item =>
     !mandatoryTools.includes(item) && item.reason !== "related-task-result");
-  let relatedRemaining = Math.max(0, optionalBudget - otherOptional.reduce(
+  const relatedToolBudget = Math.max(0, optionalBudget - otherOptional.reduce(
     (total, item) => total + Buffer.byteLength(item.text, "utf8"), 0));
+  const resultBudget = config.maxRelevantResultTokens ?? config.maxToolTranscriptTokens;
+  // A complete producer may borrow from its result allowance, never enlarge
+  // the combined optional budget. Reserve enough for its paired observation.
+  const otherResultBytes = relevantUnits.filter(unit => unit.reason !== "related-task-result")
+    .reduce((total, unit) => total + Buffer.byteLength(unit.renderedResult, "utf8"), 0);
+  let relatedRemaining = relatedToolBudget + Math.max(0, resultBudget - otherResultBytes);
+  const setupId = relevantUnits.find(unit => unit.reason === "related-task-result" &&
+    sharedContainerTarget(executionText(request) ?? "", commandArgument(unit.call), true))?.call.candidateId;
   const relatedTools = requestAwareTools.selected.filter(item =>
     !mandatoryTools.includes(item) && item.reason === "related-task-result")
-    .sort((left, right) => right.entryIndex - left.entryIndex)
+    .sort((left, right) =>
+      Number(right.id === setupId) - Number(left.id === setupId) || right.entryIndex - left.entryIndex)
     .filter(item => {
       const bytes = Buffer.byteLength(item.text, "utf8");
-      if (bytes > relatedRemaining) return false;
-      relatedRemaining -= bytes;
+      const unit = relevantUnits.find(unit => unit.call.candidateId === item.id);
+      const resultReserve = Math.min(256, Buffer.byteLength(unit?.renderedResult ?? "", "utf8"));
+      if (bytes + resultReserve > relatedRemaining) return false;
+      relatedRemaining -= bytes + resultReserve;
       return true;
     });
+  const borrowed = Math.max(0, relatedTools.reduce((total, item) =>
+    total + Buffer.byteLength(item.text, "utf8"), 0) - relatedToolBudget);
   const optionalTools = selectEvidence(
     [...otherOptional, ...relatedTools],
     "tool",
-    optionalBudget,
+    optionalBudget + borrowed,
   );
   const tools = {
     selected: [...mandatoryTools, ...optionalTools.selected],
     truncated: optionalTools.truncated || mandatoryTools.some(item => item.preTruncated),
   };
-  const relevantBudget =
-    config.maxRelevantResultTokens ?? config.maxToolTranscriptTokens;
+  const relevantBudget = Math.max(0, resultBudget - borrowed);
   const sandboxSupplement = sandboxTrapSupplement(request);
   const sandboxEvidence = sandboxTrapEvidence(request);
   const relevantCandidates = [
@@ -1866,10 +1920,9 @@ export function buildClassifierTranscript(
           sensitivity: "boundary" as const,
         }]
       : []),
-    ...relevantUnits
-      .filter((unit) =>
+    ...boundRelatedResults(relevantUnits.filter((unit) =>
         tools.selected.some((tool) => tool.id === unit.call.candidateId),
-      )
+      ), Math.max(0, relevantBudget - otherResultBytes))
       .map((unit) => ({
         index: unit.index,
         id: unit.resultId,

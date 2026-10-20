@@ -10,6 +10,7 @@ import type {
 } from "@gotgenes/pi-permission-system";
 import {
   canonicalReviewerJson,
+  executionText,
   normalizePermissionEvidence,
   type TranscriptResult,
 } from "../policy.ts";
@@ -207,13 +208,14 @@ export function sharedReviewContext(
 /**
  * The bounded projection of a request that the reviewer model sees.
  *
- * `command`, `executedUnit`, and `fullCommand` are each cut to
+ * Present the whole shell program as `command`, with a separate matched fragment.
+ * `command`, `executedUnit`, and `matchedCommand` are each cut to
  * {@link MAX_REVIEWER_COMMAND_BYTES}; any cut sets `fullCommandTruncated` so the
  * caller can fail closed instead of reviewing an incomplete program. Hashing,
  * hard denies, retry matching, and denial labels keep using the untruncated
  * request.
  */
-export function reviewerRequestView(request: BoundaryRequest): BoundaryRequest {
+export function reviewerRequestView(request: BoundaryRequest): BoundaryRequest & { matchedCommand?: string } {
   let truncated = false;
   const cut = (value: string | undefined): string | undefined => {
     if (value === undefined) return undefined;
@@ -223,16 +225,17 @@ export function reviewerRequestView(request: BoundaryRequest): BoundaryRequest {
     truncated = true;
     return truncateUtf8(value, MAX_REVIEWER_COMMAND_BYTES);
   };
-  const view: BoundaryRequest = { ...request };
-  const command = cut(request.command);
+  const view: BoundaryRequest & { matchedCommand?: string } = { ...request };
+  const command = cut(executionText(request));
   const executedUnit = cut(request.executedUnit);
-  const fullCommand = cut(request.fullCommand);
+  const matchedCommand = request.fullCommand && request.command !== request.fullCommand
+    ? cut(request.command) : undefined;
   if (command === undefined) delete view.command;
   else view.command = command;
   if (executedUnit === undefined) delete view.executedUnit;
   else view.executedUnit = executedUnit;
-  if (fullCommand === undefined) delete view.fullCommand;
-  else view.fullCommand = fullCommand;
+  delete view.fullCommand;
+  if (matchedCommand !== undefined) view.matchedCommand = matchedCommand;
   if (truncated) view.fullCommandTruncated = true;
   return view;
 }

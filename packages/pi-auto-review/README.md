@@ -366,6 +366,12 @@ untrusted evidence. Selection is deterministic rather than semantic:
   Sandbox Runtime process evidence, and bounded observations about matching
   explicit targets.
 
+Literal container names can select related observations, but do not prove
+ownership or authorize cleanup.
+The first matching setup and a recent observation receive retrieval priority.
+Only public text before the exact call in the same assistant message is
+included as bounded `publicActionContext`; it carries no authority.
+
 Public assistant text immediately preceding a retained user reply is linked to
 that reply as `assistant-proposal` context with no authority of its own.
 It resolves what a user accepted or rejected without treating assistant text as
@@ -378,11 +384,18 @@ not rewrite a model allow from regex matches on user text, vague continuations,
 or a computed authorization ceiling; those judgments stay with the reviewer
 model. Hard denies still terminate before the model.
 
-The current operation appears once as stable, key-sorted JSON. Duplicate exact
-tool-call arguments collapse to an ID/name/reason linkage shell, while fields
-not represented by the request remain available as evidence. This compact
+The current operation appears once as stable, key-sorted JSON.
+The reviewer sees the complete shell program as `request.command`, and the
+rule-matched fragment separately as `matchedCommand`.
+Duplicate exact tool-call arguments use explicit `argumentsFromRequest` links;
+fields not represented by the request remain in `supplement`.
+This compact
 reviewer representation does not affect request hashes, grants, overrides, or
 audit evidence.
+
+Routine CLI help, non-secret account metadata, and focused temporary local tests
+fall within task preparation; explicit user restrictions still prevail.
+Generic process-kill patterns require ownership evidence for every match.
 
 `maxReviewerInputTokens` covers the fixed policy, canonical request, override,
 evidence, omissions, JSON framing, and a 64-token provider-framing reserve. Its
@@ -398,8 +411,10 @@ calling the model. More than four security-combination candidates also fails
 closed locally.
 
 Optional related results are explicitly labelled excerpts when shortened.
-They remain paired with the complete producer call; a producer that cannot fit
-the optional tool budget is excluded together with its result.
+They remain paired with the complete producer call.
+A producer can share its paired result allowance; the combined optional budget
+does not grow, and non-related result allowances stay reserved.
+A producer that cannot fit is excluded together with its result.
 Proposals use a separate allowance bounded by `maxUserTranscriptTokens`, and
 the combined request still has to fit `maxReviewerInputTokens`.
 

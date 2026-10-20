@@ -1135,10 +1135,12 @@ test("real permission-system authorizer chain integration", async (t) => {
         /override.*host-generated/,
       );
       const toolJson = evidence.toolCalls.items[0]?.content;
-      assert.equal(
-        toolJson,
-        '{"id":"call-current","name":"bash","reason":"exact-tool-call"}',
-      );
+      const linkedCall = JSON.parse(String(toolJson));
+      assert.equal(linkedCall.id, "call-current");
+      assert.equal(linkedCall.name, "bash");
+      assert.equal(linkedCall.reason, "exact-tool-call");
+      assert.deepEqual(linkedCall.argumentsFromRequest, { command: "command" });
+      assert.match(linkedCall.argumentRepresentation, /Complete arguments/);
       assert.equal(prompt.match(/touch \/tmp\/reviewed/g)?.length, 1);
       assert.doesNotMatch(prompt, /"arguments"/);
       const completion = instance.telemetry.find(
